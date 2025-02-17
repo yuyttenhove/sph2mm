@@ -446,6 +446,7 @@ dependencies = [
  "clap",
  "glam",
  "hdf5",
+ "ndarray",
 ]
 
 [[package]]

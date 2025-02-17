@@ -2,6 +2,8 @@ use std::f64;
 
 use clap::Parser;
 use glam::DVec3;
+use ndarray::Array1;
+use ndarray::Array2;
 use octree::TreeNodeLeafData;
 
 mod octree;
@@ -110,6 +112,17 @@ fn read_particle_data(fname: &str) -> Result<Vec<SphParticle>, hdf5::Error> {
     Ok(particles)
 }
 
+fn get_part_arrays(parts: &[SphParticle]) -> (Array2<f64>, Array1<f64>, Array2<f64>, Array1<f64>, Array1<f64>) {
+    let num_part = parts.len();
+    let coordinates = Array2::from_shape_vec((num_part, 3), parts.iter().map(|p| p.loc.to_array().into_iter()).flatten().collect()).expect("unable to create array");
+    let masses = Array1::from_vec(parts.iter().map(|p| p.mass).collect());
+    let velocities = Array2::from_shape_vec((num_part, 3), parts.iter().map(|p| p.velocity.to_array().into_iter()).flatten().collect()).expect("unable to create array");
+    let internal_energy = Array1::from_vec(parts.iter().map(|p| p.internal_energy).collect());
+    let smoothing_length = Array1::from_vec(parts.iter().map(|p| p.smoothing_length).collect());
+
+    (coordinates, masses, velocities, internal_energy, smoothing_length)
+}
+
 fn modify_ics(
     parts: &[SphParticle],
     volumes: &[f64],
@@ -146,46 +159,27 @@ fn modify_ics(
     file_out.unlink("PartType0")?;
 
     // Write new hdyro particle data
+    let (coordinates, masses, velocities, internal_energy, smoothing_length) = get_part_arrays(parts);
     let part_data = file_out.create_group("PartType0")?;
     part_data
         .new_dataset_builder()
-        .with_data(
-            &parts
-                .iter()
-                .map(|part| part.loc.to_array())
-                .collect::<Vec<_>>(),
-        )
+        .with_data(coordinates.view())
         .create("Coordinates")?;
     part_data
         .new_dataset_builder()
-        .with_data(&parts.iter().map(|part| part.mass).collect::<Vec<_>>())
+        .with_data(masses.view())
         .create("Masses")?;
     part_data
         .new_dataset_builder()
-        .with_data(
-            &parts
-                .iter()
-                .map(|part| part.velocity.to_array())
-                .collect::<Vec<_>>(),
-        )
+        .with_data(velocities.view())
         .create("Velocities")?;
     part_data
         .new_dataset_builder()
-        .with_data(
-            &parts
-                .iter()
-                .map(|part| part.internal_energy)
-                .collect::<Vec<_>>(),
-        )
+        .with_data(internal_energy.view())
         .create("InternalEnergy")?;
     part_data
         .new_dataset_builder()
-        .with_data(
-            &parts
-                .iter()
-                .map(|part| part.smoothing_length)
-                .collect::<Vec<_>>(),
-        )
+        .with_data(smoothing_length.view())
         .create("SmoothingLength")?;
     part_data
         .new_dataset_builder()
