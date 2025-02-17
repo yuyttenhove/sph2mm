@@ -1,7 +1,15 @@
 [package]
 name = "sph2mm"
+description = "Add an AMR background to an existing SPH initial conditions file"
 version = "0.1.0"
 edition = "2021"
+license = "LGPL-3.0+"
+readme = "readme.md"
+authors = ["Yolan Uyttenhove"]
+repository = "https://github.com/yuyttenhove/sph2mm.git"
+keywords = ["physics", "moving_mesh", "SPH"]
+categories = ["simulation", "science", "mathematics"]
+exclude = ["test_ics"]
 
 [dependencies]
 clap = { version = "4.5.29", features = ["derive"] }
