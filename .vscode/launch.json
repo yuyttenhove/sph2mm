@@ -1,0 +1,16 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb-dap",
+            "request": "launch",
+            "name": "SPH2MM",
+            "program": "${workspaceRoot}/target/debug/sph2mm",
+            "args": ["test_ics/galaxy_multi_component.hdf5", "--center", "750.", "750.", "750.", ],
+            "cwd": "${workspaceRoot}",
+        }
+    ]
+}
