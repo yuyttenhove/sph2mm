@@ -1,4 +1,3 @@
-use core::num;
 use std::f64;
 
 use clap::Parser;
