@@ -112,15 +112,47 @@ fn read_particle_data(fname: &str) -> Result<Vec<SphParticle>, hdf5::Error> {
     Ok(particles)
 }
 
-fn get_part_arrays(parts: &[SphParticle]) -> (Array2<f64>, Array1<f64>, Array2<f64>, Array1<f64>, Array1<f64>) {
+fn get_part_arrays(
+    parts: &[SphParticle],
+) -> (
+    Array2<f64>,
+    Array1<f32>,
+    Array2<f32>,
+    Array1<f32>,
+    Array1<f32>,
+) {
     let num_part = parts.len();
-    let coordinates = Array2::from_shape_vec((num_part, 3), parts.iter().map(|p| p.loc.to_array().into_iter()).flatten().collect()).expect("unable to create array");
-    let masses = Array1::from_vec(parts.iter().map(|p| p.mass).collect());
-    let velocities = Array2::from_shape_vec((num_part, 3), parts.iter().map(|p| p.velocity.to_array().into_iter()).flatten().collect()).expect("unable to create array");
-    let internal_energy = Array1::from_vec(parts.iter().map(|p| p.internal_energy).collect());
-    let smoothing_length = Array1::from_vec(parts.iter().map(|p| p.smoothing_length).collect());
+    let coordinates = Array2::from_shape_vec(
+        (num_part, 3),
+        parts
+            .iter()
+            .map(|p| p.loc.to_array().into_iter())
+            .flatten()
+            .collect(),
+    )
+    .expect("unable to create array");
+    let masses = Array1::from_vec(parts.iter().map(|p| p.mass as f32).collect());
+    let velocities = Array2::from_shape_vec(
+        (num_part, 3),
+        parts
+            .iter()
+            .map(|p| p.velocity.as_vec3().to_array().into_iter())
+            .flatten()
+            .collect(),
+    )
+    .expect("unable to create array");
+    let internal_energy =
+        Array1::from_vec(parts.iter().map(|p| p.internal_energy as f32).collect());
+    let smoothing_length =
+        Array1::from_vec(parts.iter().map(|p| p.smoothing_length as f32).collect());
 
-    (coordinates, masses, velocities, internal_energy, smoothing_length)
+    (
+        coordinates,
+        masses,
+        velocities,
+        internal_energy,
+        smoothing_length,
+    )
 }
 
 fn modify_ics(
@@ -159,7 +191,8 @@ fn modify_ics(
     file_out.unlink("PartType0")?;
 
     // Write new hdyro particle data
-    let (coordinates, masses, velocities, internal_energy, smoothing_length) = get_part_arrays(parts);
+    let (coordinates, masses, velocities, internal_energy, smoothing_length) =
+        get_part_arrays(parts);
     let part_data = file_out.create_group("PartType0")?;
     part_data
         .new_dataset_builder()
@@ -263,5 +296,6 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    modify_ics(&mm_particles, &volumes, &args.sph, &args.modified).expect("Error while writing ICs");
+    modify_ics(&mm_particles, &volumes, &args.sph, &args.modified)
+        .expect("Error while writing ICs");
 }
