@@ -9,7 +9,7 @@
             "request": "launch",
             "name": "SPH2MM",
             "program": "${workspaceRoot}/target/debug/sph2mm",
-            "args": ["test_ics/galaxy_multi_component.hdf5", "--center", "750.", "750.", "750.", ],
+            "args": ["test_ics/galaxy_multi_component.hdf5", "test_ics/test.hdf5", "--center", "750.", "750.", "750.", ],
             "cwd": "${workspaceRoot}",
         }
     ]

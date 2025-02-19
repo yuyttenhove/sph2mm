@@ -9,10 +9,14 @@ authors = ["Yolan Uyttenhove"]
 repository = "https://github.com/yuyttenhove/sph2mm.git"
 keywords = ["physics", "moving_mesh", "SPH"]
 categories = ["simulation", "science", "mathematics"]
-exclude = ["test_ics"]
+exclude = ["test_ics", "launch.json"]
 
 [dependencies]
 clap = { version = "4.5.29", features = ["derive"] }
-glam = "0.29.2"
+glam = "0.27"
 hdf5 = "0.8.1"
+indicatif = "0.17.11"
+meshless_voronoi = "0.7.2"
 ndarray = "0.15"
+rand = "0.9.0"
+rstar = "0.12.2"

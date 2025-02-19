@@ -1,14 +1,16 @@
 use glam::{DVec3, UVec3};
 
-pub trait TreeNodeLeafData: Copy {
+pub trait TreeNodeLeafData: Copy + Clone {
     fn loc(&self) -> DVec3;
 }
 
+#[derive(Clone, Copy)]
 enum TreeNodeData<D: TreeNodeLeafData> {
     Data(Option<D>),
     Children(usize),
 }
 
+#[derive(Clone)]
 pub struct TreeNode<D: TreeNodeLeafData> {
     anchor: DVec3,
     width: DVec3,
@@ -58,14 +60,15 @@ impl<D: TreeNodeLeafData> TreeNode<D> {
     }
 }
 
+#[derive(Clone)]
 pub struct Octree<D: TreeNodeLeafData> {
     nodes: Vec<TreeNode<D>>,
     top_level_count: usize,
 }
 
 impl<D: TreeNodeLeafData> Octree<D> {
-    pub fn init(box_size: DVec3, resolution: u32, box_center: Option<DVec3>) -> Self {
-        let box_center = box_center.unwrap_or_default();
+    pub fn init(box_size: DVec3, resolution: u32, box_center_shift: Option<DVec3>) -> Self {
+        let box_center = box_center_shift.unwrap_or_default();
         let min_width = box_size.min_element();
         let resolution = UVec3::new(
             (box_size.x / min_width * resolution as f64).round() as u32,

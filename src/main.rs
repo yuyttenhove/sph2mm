@@ -2,59 +2,32 @@ use std::f64;
 
 use clap::Parser;
 use glam::DVec3;
+use meshless_voronoi::integrals::VolumeCentroidIntegral;
+use meshless_voronoi::Dimensionality;
+use meshless_voronoi::VoronoiIntegrator;
 use ndarray::Array1;
 use ndarray::Array2;
 use octree::TreeNodeLeafData;
 
 mod octree;
+mod sph;
+
 use octree::Octree;
+use rand::rngs::ThreadRng;
+use rand::Rng;
+use sph::CubicSpline;
+use sph::SphInterpolator;
+use sph::SphParticle;
 
 #[derive(Clone, Copy)]
 struct SphData {
-    id: usize,
+    _id: usize,
     loc: DVec3,
 }
 
 impl TreeNodeLeafData for SphData {
     fn loc(&self) -> DVec3 {
         self.loc
-    }
-}
-
-#[derive(Clone)]
-struct SphParticle {
-    loc: DVec3,
-    velocity: DVec3,
-    mass: f64,
-    internal_energy: f64,
-    smoothing_length: f64,
-}
-
-impl SphParticle {
-    fn new(
-        loc: DVec3,
-        velocity: DVec3,
-        mass: f64,
-        internal_energy: f64,
-        smoothing_length: f64,
-    ) -> Self {
-        Self {
-            loc,
-            velocity,
-            mass,
-            internal_energy,
-            smoothing_length,
-        }
-    }
-
-    fn init_background(loc: DVec3, density: f64, internal_energy: f64, volume: f64) -> Self {
-        Self::new(
-            loc,
-            DVec3::ZERO,
-            density * volume,
-            internal_energy,
-            3. / 4. * f64::consts::FRAC_1_PI * volume.cbrt(),
-        )
     }
 }
 
@@ -77,7 +50,7 @@ fn read_box_info(fname: &str) -> Result<DVec3, hdf5::Error> {
     Ok(box_size)
 }
 
-fn read_particle_data(fname: &str) -> Result<Vec<SphParticle>, hdf5::Error> {
+fn read_particle_data(fname: &str, smoothing_length_factor: f64) -> Result<Vec<SphParticle>, hdf5::Error> {
     let file = hdf5::File::open(fname)?;
 
     // Read particle data
@@ -86,7 +59,10 @@ fn read_particle_data(fname: &str) -> Result<Vec<SphParticle>, hdf5::Error> {
     let masses = data.dataset("Masses")?.read_raw::<f64>()?;
     let velocities = data.dataset("Velocities")?.read_raw::<f64>()?;
     let internal_energy = data.dataset("InternalEnergy")?.read_raw::<f64>()?;
-    let smoothing_length = data.dataset("SmoothingLength")?.read_raw::<f64>()?;
+    let mut smoothing_length = data.dataset("SmoothingLength")?.read_raw::<f64>()?;
+    for hsml in smoothing_length.iter_mut() {
+        *hsml *= smoothing_length_factor;
+    }
 
     let coordinates = coordinates
         .chunks(3)
@@ -252,7 +228,16 @@ struct Args {
     #[arg(short, long, num_args = 3, value_delimiter = ' ')]
     center: Option<Vec<f64>>,
 
-    /// Perform <N> interations of mesh relaxation
+    /// Smoothing length factor. Smoothing lengths from the SPH ICs are multiplied by this 
+    /// factor before redistributing the hydrodynamical quantities.
+    #[arg(short, long)]
+    smoothing_length_factor: Option<f64>,
+
+    /// Reinitialize the smoothing lengths such that each particle has <N> neighbours in its kernel.
+    #[arg(short='N', long)]
+    number_of_neighbours: Option<usize>,
+
+    /// Perform <R> iterations of Lloyd mesh relaxation before redistributing the hydrodynamical quantities
     #[arg(short = 'R', long, default_value_t = 0)]
     relax: u8,
 }
@@ -260,42 +245,46 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    if args.relax > 0 {
-        unimplemented!("Mesh relaxation is not supported yet!")
+    if args.smoothing_length_factor.is_some() && args.number_of_neighbours.is_some() {
+        panic!("At most one of --smoothing-length-factor or --number-of-neighbours may be specified!");
     }
 
     let box_size = read_box_info(&args.sph).expect("Error while reading box info!");
-    let sph_particles = read_particle_data(&args.sph).expect("Error while reading particle data!");
+    let box_center_shift = args.center.map(|v| DVec3::from_slice(&v));
+    let mut sph_particles = read_particle_data(&args.sph, args.smoothing_length_factor.unwrap_or(1.)).expect("Error while reading particle data!");
 
-    let mut tree = Octree::init(
+    println!("Building tree...");
+    let mut tree: Octree<SphData> = Octree::init(
         box_size,
         args.resolution,
-        args.center.map(|v| DVec3::from_slice(&v)),
+        box_center_shift,
     );
     for (id, p) in sph_particles.iter().enumerate() {
-        tree.insert(SphData { id, loc: p.loc });
+        tree.insert(SphData { _id: id, loc: p.loc });
     }
 
-    let mut volumes = Vec::with_capacity(sph_particles.len());
-    let mm_particles = tree
-        .into_leaves()
-        .iter()
-        .map(|leaf| match leaf.data() {
-            Some(data) => {
-                volumes.push(
-                    4. / 3. * f64::consts::PI * sph_particles[data.id].smoothing_length.powi(3),
-                );
-                sph_particles[data.id].clone()
-            }
-            None => {
-                let loc = leaf.anchor() + 0.5 * leaf.width();
-                let volume = leaf.width().element_product();
-                volumes.push(volume);
-                SphParticle::init_background(loc, args.density, args.internal_energy, volume)
-            }
-        })
-        .collect::<Vec<_>>();
+    println!("Computing Voronoi cells and performing mesh relaxation...");
+    let tree_leaves = tree.into_leaves();
+    let mut rng = ThreadRng::default();
+    let mut mm_generators = tree_leaves.iter().map(|l| {
+        match l.data() {
+            Some(data) => data.loc,
+            None => l.anchor() + 0.5 * l.width() + 0.01 * (DVec3::new(rng.random(), rng.random(), rng.random()) - 0.5),
+        }
+    }).collect::<Vec<_>>();
+    let mut volumes_centroids = VoronoiIntegrator::build(&mm_generators, None, -box_center_shift.unwrap_or_default(), box_size, Dimensionality::ThreeD, false).compute_cell_integrals::<VolumeCentroidIntegral>();
+    for _ in 0..args.relax {
+        mm_generators = volumes_centroids.iter().map(|vc| vc.centroid).collect::<Vec<_>>();
+        volumes_centroids = VoronoiIntegrator::build(&mm_generators, None, -box_center_shift.unwrap_or_default(), box_size, Dimensionality::ThreeD, false).compute_cell_integrals::<VolumeCentroidIntegral>();
+    }
+    let mm_volumes = volumes_centroids.iter().map(|vc| vc.volume).collect::<Vec<_>>();
+    let mm_centroids = volumes_centroids.iter().map(|vc| vc.centroid).collect::<Vec<_>>();
 
-    modify_ics(&mm_particles, &volumes, &args.sph, &args.modified)
+    println!("Interpolating...");
+    let interp = SphInterpolator::init(&mut sph_particles, args.number_of_neighbours, CubicSpline);
+    let mm_particles = interp.interpolate(&mm_generators, &mm_volumes, &mm_centroids, args.density, args.internal_energy);
+
+    println!("Writing modified ICs...");
+    modify_ics(&mm_particles, &mm_volumes, &args.sph, &args.modified)
         .expect("Error while writing ICs");
 }
