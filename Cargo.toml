@@ -1,7 +1,7 @@
 [package]
 name = "sph2mm"
 description = "Add an AMR background to an existing SPH initial conditions file"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "LGPL-3.0+"
 readme = "readme.md"
@@ -16,7 +16,7 @@ clap = { version = "4.5.29", features = ["derive"] }
 glam = "0.27"
 hdf5 = "0.8.1"
 indicatif = "0.17.11"
-meshless_voronoi = "0.7.2"
+meshless_voronoi = { version = "0.7.2", features = ["rayon"] }
 ndarray = "0.15"
 rand = "0.9.0"
 rstar = "0.12.2"
