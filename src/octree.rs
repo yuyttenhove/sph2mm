@@ -1,25 +1,21 @@
 use glam::{DVec3, UVec3};
 
-pub trait TreeNodeLeafData: Copy + Clone {
-    fn loc(&self) -> DVec3;
-}
-
 #[derive(Clone, Copy)]
-enum TreeNodeData<D: TreeNodeLeafData> {
-    Data(Option<D>),
+enum TreeNodeData {
+    Data(Option<DVec3>),
     Children(usize),
 }
 
 #[derive(Clone)]
-pub struct TreeNode<D: TreeNodeLeafData> {
+pub struct TreeNode {
     anchor: DVec3,
     width: DVec3,
-    inner: TreeNodeData<D>,
+    inner: TreeNodeData,
 }
 
-impl<D: TreeNodeLeafData> TreeNode<D> {
+impl TreeNode {
     /// We can only directly create leaf nodes
-    fn new(anchor: DVec3, width: DVec3, data: Option<D>) -> Self {
+    fn new(anchor: DVec3, width: DVec3, data: Option<DVec3>) -> Self {
         TreeNode {
             anchor,
             width,
@@ -44,7 +40,7 @@ impl<D: TreeNodeLeafData> TreeNode<D> {
         }
     }
 
-    pub fn data(&self) -> Option<D> {
+    pub fn data(&self) -> Option<DVec3> {
         match self.inner {
             TreeNodeData::Data(data) => data,
             TreeNodeData::Children(_) => None,
@@ -61,13 +57,13 @@ impl<D: TreeNodeLeafData> TreeNode<D> {
 }
 
 #[derive(Clone)]
-pub struct Octree<D: TreeNodeLeafData> {
-    nodes: Vec<TreeNode<D>>,
+pub struct Octree {
+    nodes: Vec<TreeNode>,
     top_level_count: usize,
 }
 
-impl<D: TreeNodeLeafData> Octree<D> {
-    pub fn init(box_size: DVec3, resolution: u32, box_center_shift: Option<DVec3>) -> Self {
+impl Octree {
+    pub fn init_from_bg_resolution(box_size: DVec3, resolution: u32, box_center_shift: Option<DVec3>) -> Self {
         let box_center = box_center_shift.unwrap_or_default();
         let min_width = box_size.min_element();
         let resolution = UVec3::new(
@@ -77,8 +73,8 @@ impl<D: TreeNodeLeafData> Octree<D> {
         );
         let width_top = box_size / resolution.as_dvec3();
         let top_level_count = resolution.element_product() as usize;
-        let mut nodes = Vec::with_capacity(top_level_count);
         let anchor = -box_center;
+        let mut nodes = Vec::with_capacity(top_level_count);
         for i in 0..resolution.x {
             let x = anchor.x + i as f64 * width_top.x;
             for j in 0..resolution.y {
@@ -96,6 +92,25 @@ impl<D: TreeNodeLeafData> Octree<D> {
         }
     }
 
+    pub fn init_from_bg_file(box_size: DVec3, file_name: &str, box_center_shift: Option<DVec3>) -> Result<Self, hdf5::Error> {
+        let file = hdf5::File::open(file_name)?;
+        let data = file.group("PartType0")?;
+        let coordinates = data.dataset("Coordinates")?.read_raw::<f64>()?;
+        let coordinates = coordinates
+            .chunks(3)
+            .map(DVec3::from_slice)
+            .collect::<Vec<_>>();
+
+        let mut nodes = Vec::with_capacity(coordinates.len());
+        let anchor = -box_center_shift.unwrap_or_default();
+        nodes.push(TreeNode::new(anchor, box_size, None));
+        let mut tree = Self { nodes, top_level_count: 1 };
+        for loc in coordinates {
+            tree.insert(loc);
+        }
+        Ok(tree)
+    }
+
     fn find_leaf_containing(&self, loc: DVec3) -> usize {
         let mut cur_node_idx = (0..self.top_level_count)
             .find(|idx| self.nodes[*idx].contains(loc))
@@ -110,20 +125,19 @@ impl<D: TreeNodeLeafData> Octree<D> {
         }
     }
 
-    pub fn insert(&mut self, data: D) {
-        let loc = data.loc();
+    pub fn insert(&mut self, loc: DVec3) {
         let leaf_idx = self.find_leaf_containing(loc);
-        self.insert_in_leaf(leaf_idx, data);
+        self.insert_in_leaf(leaf_idx, loc);
     }
 
-    fn insert_in_leaf(&mut self, leaf_idx: usize, data: D) {
+    fn insert_in_leaf(&mut self, leaf_idx: usize, loc: DVec3) {
         assert!(self.nodes[leaf_idx].is_leaf());
         let leaf_data = match self.nodes[leaf_idx].inner {
             TreeNodeData::Data(data) => data,
             TreeNodeData::Children(_) => unreachable!("A leaf node does not have children"),
         };
         match leaf_data {
-            None => self.nodes[leaf_idx].inner = TreeNodeData::Data(Some(data)),
+            None => self.nodes[leaf_idx].inner = TreeNodeData::Data(Some(loc)),
             Some(leaf_data) => {
                 // Convert to interior node
                 let offset = self.nodes.len();
@@ -143,7 +157,7 @@ impl<D: TreeNodeLeafData> Octree<D> {
                                 cwidth,
                                 None,
                             );
-                            if node.contains(leaf_data.loc()) {
+                            if node.contains(leaf_data) {
                                 node.inner = TreeNodeData::Data(Some(leaf_data))
                             }
                             self.nodes.push(node);
@@ -151,14 +165,14 @@ impl<D: TreeNodeLeafData> Octree<D> {
                     }
                 }
                 let next_leaf_idx = (offset..offset + 8)
-                    .find(|idx| self.nodes[*idx].contains(data.loc()))
+                    .find(|idx| self.nodes[*idx].contains(loc))
                     .expect("One of the children must contain the new data");
-                self.insert_in_leaf(next_leaf_idx, data);
+                self.insert_in_leaf(next_leaf_idx, loc);
             }
         }
     }
 
-    pub fn into_leaves(self) -> Vec<TreeNode<D>> {
+    pub fn into_leaves(self) -> Vec<TreeNode> {
         self.nodes.into_iter().filter(|n| n.is_leaf()).collect()
     }
 }

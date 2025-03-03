@@ -124,10 +124,11 @@ impl<'a, K: SphKernel> SphInterpolator<'a, K> {
 
         let mut total_mass_after = 0.;
         let mut total_mass_bg = 0.;
+        let mut npart_bg = 0;
         let n_part = generators.len();
         let mut conserved = vec![Conserved::default(); n_part];
         let mut n_hit = vec![0; n_part];
-        for (p, &w_sum) in self.particles.iter().progress_with_style(ProgressStyle::with_template(" -> Computing weights: {bar} {pos:>7}/{len:7} {elapsed_precise}").unwrap()).zip(sph_weights.iter()) {
+        for (p, &w_sum) in self.particles.iter().progress_with_style(ProgressStyle::with_template(" -> Redistributing quantities: {bar} {pos:>7}/{len:7} {elapsed_precise}").unwrap()).zip(sph_weights.iter()) {
             let h2 = p.smoothing_length * p.smoothing_length;
             let query_point = p.loc.to_array();
             for loc_id in rtree.nearest_neighbor_iter(&query_point) {
@@ -153,11 +154,13 @@ impl<'a, K: SphKernel> SphInterpolator<'a, K> {
             } else {
                 let part = SphParticle::init_background(*x, background_density, background_internal_energy, *vol);
                 total_mass_bg += part.mass;
+                npart_bg += 1;
                 part
             }
-        }).collect();
+        }).collect::<Vec<_>>();
         println!(" -> Total mass after redistributing: {:}", total_mass_after);
         println!(" -> Total mass in background: {:}", total_mass_bg);
+        println!(" -> Number of background particles / Total: {:} / {:}", npart_bg, particles.len());
         particles
     }
 }

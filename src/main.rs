@@ -7,7 +7,6 @@ use meshless_voronoi::Dimensionality;
 use meshless_voronoi::VoronoiIntegrator;
 use ndarray::Array1;
 use ndarray::Array2;
-use octree::TreeNodeLeafData;
 
 mod octree;
 mod sph;
@@ -19,17 +18,6 @@ use sph::CubicSpline;
 use sph::SphInterpolator;
 use sph::SphParticle;
 
-#[derive(Clone, Copy)]
-struct SphData {
-    _id: usize,
-    loc: DVec3,
-}
-
-impl TreeNodeLeafData for SphData {
-    fn loc(&self) -> DVec3 {
-        self.loc
-    }
-}
 
 fn read_box_info(fname: &str) -> Result<DVec3, hdf5::Error> {
     let file = hdf5::File::open(fname)?;
@@ -213,15 +201,19 @@ struct Args {
     modified: String,
 
     /// Resolution of background grid
-    #[arg(short, long, default_value_t = 32)]
-    resolution: u32,
+    #[arg(short, long)]
+    resolution: Option<u32>,
+
+    /// Read positions of background particles from a .hdf5 file (under /PartType0/Coordinates)
+    #[arg(short='f', long)]
+    background_file: Option<String>,
 
     /// Density of background particles
-    #[arg(short, long, default_value_t = 1.)]
+    #[arg(short, long, default_value_t = 0.)]
     density: f64,
 
     /// Internal energy of background particles
-    #[arg(short, long, default_value_t = 1.)]
+    #[arg(short, long, default_value_t = 0.)]
     internal_energy: f64,
 
     /// Center of the box
@@ -254,13 +246,21 @@ fn main() {
     let mut sph_particles = read_particle_data(&args.sph, args.smoothing_length_factor.unwrap_or(1.)).expect("Error while reading particle data!");
 
     println!("Building tree...");
-    let mut tree: Octree<SphData> = Octree::init(
-        box_size,
-        args.resolution,
-        box_center_shift,
-    );
-    for (id, p) in sph_particles.iter().enumerate() {
-        tree.insert(SphData { _id: id, loc: p.loc });
+    let mut tree = match (args.resolution, args.background_file) {
+        (Some(resolution), None) => Octree::init_from_bg_resolution(
+            box_size,
+            resolution,
+            box_center_shift,
+        ),
+        (None, Some(file_name)) => Octree::init_from_bg_file(
+            box_size,
+            &file_name,
+            box_center_shift,
+        ).expect("Error reading background coordinates from file!"),
+        _ => panic!("Need to specify exactly one of --resolution and --background-file!"),
+    };
+    for p in sph_particles.iter() {
+        tree.insert(p.loc );
     }
 
     println!("Computing Voronoi cells and performing mesh relaxation...");
@@ -268,7 +268,7 @@ fn main() {
     let mut rng = ThreadRng::default();
     let mut mm_generators = tree_leaves.iter().map(|l| {
         match l.data() {
-            Some(data) => data.loc,
+            Some(loc) => loc,
             None => l.anchor() + 0.5 * l.width() + 0.01 * (DVec3::new(rng.random(), rng.random(), rng.random()) - 0.5),
         }
     }).collect::<Vec<_>>();
