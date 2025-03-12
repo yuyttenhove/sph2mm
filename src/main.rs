@@ -14,10 +14,28 @@ mod sph;
 use octree::Octree;
 use rand::rngs::ThreadRng;
 use rand::Rng;
+use rstar::PointDistance;
+use rstar::{primitives::GeomWithData, RTree};
+use sph::sph_init_smoothing_lengths;
 use sph::CubicSpline;
 use sph::SphInterpolator;
 use sph::SphParticle;
 
+type LocId = GeomWithData<[f64; 3], usize>;
+
+enum Generator {
+    IC(DVec3),
+    BG(DVec3),
+}
+
+impl Generator {
+    fn loc(&self) -> DVec3 {
+        match self {
+            Self::IC(loc) => *loc,
+            Self::BG(loc) => *loc,
+        }
+    }
+}
 
 fn read_box_info(fname: &str) -> Result<DVec3, hdf5::Error> {
     let file = hdf5::File::open(fname)?;
@@ -38,7 +56,10 @@ fn read_box_info(fname: &str) -> Result<DVec3, hdf5::Error> {
     Ok(box_size)
 }
 
-fn read_particle_data(fname: &str, smoothing_length_factor: f64) -> Result<Vec<SphParticle>, hdf5::Error> {
+fn read_particle_data(
+    fname: &str,
+    smoothing_length_factor: f64,
+) -> Result<Vec<SphParticle>, hdf5::Error> {
     let file = hdf5::File::open(fname)?;
 
     // Read particle data
@@ -205,7 +226,7 @@ struct Args {
     resolution: Option<u32>,
 
     /// Read positions of background particles from a .hdf5 file (under /PartType0/Coordinates)
-    #[arg(short='f', long)]
+    #[arg(short = 'f', long)]
     background_file: Option<String>,
 
     /// Density of background particles
@@ -220,14 +241,18 @@ struct Args {
     #[arg(short, long, num_args = 3, value_delimiter = ' ')]
     center: Option<Vec<f64>>,
 
-    /// Smoothing length factor. Smoothing lengths from the SPH ICs are multiplied by this 
+    /// Smoothing length factor. Smoothing lengths from the SPH ICs are multiplied by this
     /// factor before redistributing the hydrodynamical quantities.
     #[arg(short, long)]
     smoothing_length_factor: Option<f64>,
 
     /// Reinitialize the smoothing lengths such that each particle has <N> neighbours in its kernel.
-    #[arg(short='N', long)]
+    #[arg(short = 'N', long)]
     number_of_neighbours: Option<usize>,
+
+    /// Background particles with more than <PRUNE> SPH neighbours will be pruned. Set to 0 to disable pruning.
+    #[arg(short = 'p', long, default_value_t = 0)]
+    prune: usize,
 
     /// Perform <R> iterations of Lloyd mesh relaxation before redistributing the hydrodynamical quantities
     #[arg(short = 'R', long, default_value_t = 0)]
@@ -238,51 +263,130 @@ fn main() {
     let args = Args::parse();
 
     if args.smoothing_length_factor.is_some() && args.number_of_neighbours.is_some() {
-        panic!("At most one of --smoothing-length-factor or --number-of-neighbours may be specified!");
+        panic!(
+            "At most one of --smoothing-length-factor or --number-of-neighbours may be specified!"
+        );
     }
 
     let box_size = read_box_info(&args.sph).expect("Error while reading box info!");
     let box_center_shift = args.center.map(|v| DVec3::from_slice(&v));
-    let mut sph_particles = read_particle_data(&args.sph, args.smoothing_length_factor.unwrap_or(1.)).expect("Error while reading particle data!");
+    println!("(Re-)initializing SPH particles...");
+    let mut sph_particles =
+        read_particle_data(&args.sph, args.smoothing_length_factor.unwrap_or(1.))
+            .expect("Error while reading particle data!");
+    if let Some(nngb) = args.number_of_neighbours {
+        sph_init_smoothing_lengths(&mut sph_particles, nngb);
+    }
 
     println!("Building tree...");
     let mut tree = match (args.resolution, args.background_file) {
-        (Some(resolution), None) => Octree::init_from_bg_resolution(
-            box_size,
-            resolution,
-            box_center_shift,
-        ),
-        (None, Some(file_name)) => Octree::init_from_bg_file(
-            box_size,
-            &file_name,
-            box_center_shift,
-        ).expect("Error reading background coordinates from file!"),
+        (Some(resolution), None) => {
+            Octree::init_from_bg_resolution(box_size, resolution, box_center_shift)
+        }
+        (None, Some(file_name)) => {
+            Octree::init_from_bg_file(box_size, &file_name, box_center_shift)
+                .expect("Error reading background coordinates from file!")
+        }
         _ => panic!("Need to specify exactly one of --resolution and --background-file!"),
     };
     for p in sph_particles.iter() {
-        tree.insert(p.loc );
+        tree.insert(p.loc);
     }
 
-    println!("Computing Voronoi cells and performing mesh relaxation...");
+    println!("Pruning tree...");
     let tree_leaves = tree.into_leaves();
     let mut rng = ThreadRng::default();
-    let mut mm_generators = tree_leaves.iter().map(|l| {
-        match l.data() {
-            Some(loc) => loc,
-            None => l.anchor() + 0.5 * l.width() + 0.01 * (DVec3::new(rng.random(), rng.random(), rng.random()) - 0.5),
+    let generators = tree_leaves
+        .iter()
+        .map(|l| match l.data() {
+            Some(loc) => Generator::IC(loc),
+            None => Generator::BG(
+                l.anchor()
+                    + 0.5 * l.width()
+                    + 0.01 * (DVec3::new(rng.random(), rng.random(), rng.random()) - 0.5),
+            ),
+        })
+        .collect::<Vec<_>>();
+    let mut mm_generators = if args.prune > 0 {
+        let tree = RTree::bulk_load(
+            generators
+                .iter()
+                .enumerate()
+                .map(|(i, c)| LocId::new(c.loc().to_array(), i))
+                .collect(),
+        );
+        let mut ngb_counts = vec![0; generators.len()];
+        for p in sph_particles.iter() {
+            for loc_id in tree.nearest_neighbor_iter(&p.loc.to_array()) {
+                let d2 = loc_id.geom().distance_2(&p.loc.to_array());
+                if d2 < 4. * p.smoothing_length * p.smoothing_length {
+                    ngb_counts[loc_id.data] += 1;
+                } else {
+                    break;
+                }
+            }
         }
-    }).collect::<Vec<_>>();
-    let mut volumes_centroids = VoronoiIntegrator::build(&mm_generators, None, -box_center_shift.unwrap_or_default(), box_size, Dimensionality::ThreeD, false).compute_cell_integrals::<VolumeCentroidIntegral>();
+        generators
+            .into_iter()
+            .zip(ngb_counts.iter())
+            .filter_map(|(g, c)| match g {
+                Generator::IC(loc) => Some(loc),
+                Generator::BG(loc) => {
+                    if *c <= args.prune {
+                        Some(loc)
+                    } else {
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        generators.into_iter().map(|g| g.loc()).collect()
+    };
+
+    println!("Computing Voronoi cells and performing mesh relaxation...");
+    let mut volumes_centroids = VoronoiIntegrator::build(
+        &mm_generators,
+        None,
+        -box_center_shift.unwrap_or_default(),
+        box_size,
+        Dimensionality::ThreeD,
+        false,
+    )
+    .compute_cell_integrals::<VolumeCentroidIntegral>();
     for _ in 0..args.relax {
-        mm_generators = volumes_centroids.iter().map(|vc| vc.centroid).collect::<Vec<_>>();
-        volumes_centroids = VoronoiIntegrator::build(&mm_generators, None, -box_center_shift.unwrap_or_default(), box_size, Dimensionality::ThreeD, false).compute_cell_integrals::<VolumeCentroidIntegral>();
+        mm_generators = volumes_centroids
+            .iter()
+            .map(|vc| vc.centroid)
+            .collect::<Vec<_>>();
+        volumes_centroids = VoronoiIntegrator::build(
+            &mm_generators,
+            None,
+            -box_center_shift.unwrap_or_default(),
+            box_size,
+            Dimensionality::ThreeD,
+            false,
+        )
+        .compute_cell_integrals::<VolumeCentroidIntegral>();
     }
-    let mm_volumes = volumes_centroids.iter().map(|vc| vc.volume).collect::<Vec<_>>();
-    let mm_centroids = volumes_centroids.iter().map(|vc| vc.centroid).collect::<Vec<_>>();
+    let mm_volumes = volumes_centroids
+        .iter()
+        .map(|vc| vc.volume)
+        .collect::<Vec<_>>();
+    let mm_centroids = volumes_centroids
+        .iter()
+        .map(|vc| vc.centroid)
+        .collect::<Vec<_>>();
 
     println!("Interpolating...");
-    let interp = SphInterpolator::init(&mut sph_particles, args.number_of_neighbours, CubicSpline);
-    let mm_particles = interp.interpolate(&mm_generators, &mm_volumes, &mm_centroids, args.density, args.internal_energy);
+    let interp = SphInterpolator::init(&sph_particles, CubicSpline);
+    let mm_particles = interp.interpolate(
+        &mm_generators,
+        &mm_volumes,
+        &mm_centroids,
+        args.density,
+        args.internal_energy,
+    );
 
     println!("Writing modified ICs...");
     modify_ics(&mm_particles, &mm_volumes, &args.sph, &args.modified)

@@ -63,7 +63,11 @@ pub struct Octree {
 }
 
 impl Octree {
-    pub fn init_from_bg_resolution(box_size: DVec3, resolution: u32, box_center_shift: Option<DVec3>) -> Self {
+    pub fn init_from_bg_resolution(
+        box_size: DVec3,
+        resolution: u32,
+        box_center_shift: Option<DVec3>,
+    ) -> Self {
         let box_center = box_center_shift.unwrap_or_default();
         let min_width = box_size.min_element();
         let resolution = UVec3::new(
@@ -92,7 +96,11 @@ impl Octree {
         }
     }
 
-    pub fn init_from_bg_file(box_size: DVec3, file_name: &str, box_center_shift: Option<DVec3>) -> Result<Self, hdf5::Error> {
+    pub fn init_from_bg_file(
+        box_size: DVec3,
+        file_name: &str,
+        box_center_shift: Option<DVec3>,
+    ) -> Result<Self, hdf5::Error> {
         let file = hdf5::File::open(file_name)?;
         let data = file.group("PartType0")?;
         let coordinates = data.dataset("Coordinates")?.read_raw::<f64>()?;
@@ -104,7 +112,10 @@ impl Octree {
         let mut nodes = Vec::with_capacity(coordinates.len());
         let anchor = -box_center_shift.unwrap_or_default();
         nodes.push(TreeNode::new(anchor, box_size, None));
-        let mut tree = Self { nodes, top_level_count: 1 };
+        let mut tree = Self {
+            nodes,
+            top_level_count: 1,
+        };
         for loc in coordinates {
             tree.insert(loc);
         }
